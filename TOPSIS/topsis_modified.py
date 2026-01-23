@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch
+import warnings
 
 ###############################################################################
 # Paper-friendly global style (matplotlib only, no seaborn/plotly)
@@ -27,9 +28,9 @@ def set_paper_style():
 
 ###############################################################################
 # Plot 1: Blue/gray ranked bar chart (horizontal)
-# Function name requested: rank_columns_1
+# Function name requested: topis_bars
 
-def rank_columns_1(scores, labels=None, title="TOPSIS Ranking (Closeness Coefficient, Ci)",
+def topis_bars(scores, labels=None, title="TOPSIS Ranking (Closeness Coefficient, Ci)",
                    xlabel="Closeness coefficient (Ci)", show_values=True,
                    save_path=None, show=True):
     """
@@ -134,7 +135,6 @@ def topsis_geometry_plot(S_plus, S_minus, best_idx, title="TOPSIS Geometry (S+ v
     # Purple/green palette
     purple = "#7C3AED"
     green = "#059669"
-    neutral = "#9CA3AF"
     text_color = "#111827"
     grid_color = "#E5E7EB"
 
@@ -197,146 +197,396 @@ def topsis_geometry_plot(S_plus, S_minus, best_idx, title="TOPSIS Geometry (S+ v
     plt.close(fig)
 
 ###############################################################################
-# TOPSIS core
+# TOPSIS helpers (type parsing + transformations for Route A)
 
 def str_extract(t):
-    if type(t) == str:
+    """Extract the type-name token from criterion_type entries."""
+    if isinstance(t, str):
         return t
-    elif type(t) == list or type(t) == tuple or type(t) == np.ndarray:
+    elif isinstance(t, (list, tuple, np.ndarray)):
         return t[0]
     else:
         return t
 
 
-import numpy as np
+def _raise_invalid_criterion_param(j, msg):
+    """Raise a ValueError with criterion column information (0-based and 1-based)."""
+    raise ValueError(f"criterion_type error at criterion column j={j} (1-based {j+1}): {msg}")
 
-def topsis_method(dataset, weights, criterion_type, verbose=True):
+
+def _finite_check_or_raise(arr, name="array"):
     """
-    Extended TOPSIS method supporting:
-    - max (benefit)
-    - min (cost)
-    - nominal (target-based)
-    - interval (range-based)
+    Ensure arr contains only finite values. If not, raise ValueError with positions.
+    """
+    arr = np.asarray(arr, dtype=float)
+    mask = ~np.isfinite(arr)
+    if np.any(mask):
+        idx = np.argwhere(mask)
+        # Show at most first 12 positions to keep message readable
+        preview = idx[:12].tolist()
+        total = int(idx.shape[0])
+        raise ValueError(
+            f"{name} contains NaN/inf at {total} position(s). "
+            f"First positions (row, col): {preview}"
+        )
+    return arr
+
+
+def parse_criterion_type(criterion_type, n):
+    """
+    Parse criterion_type into (ctype_name, params) lists.
+
+    Supported formats per criterion j:
+      - 'max' or 'min'
+      - ['nominal', target_value]
+      - ['interval', a, b]   (a/b order can be swapped)
+
+    Returns
+    -------
+    ctype_name : list[str] length n
+        One of {'max','min','nominal','interval'}.
+    params : list[tuple]
+        Parameters for nominal/interval; empty tuple for max/min.
+        - nominal: (target,)
+        - interval: (L, U) with L <= U
+    """
+    if len(criterion_type) != n:
+        raise ValueError("criterion_type length must equal number of criteria (dataset.shape[1]).")
+
+    ctype_name = []
+    params = []
+
+    for j in range(n):
+        entry = criterion_type[j]
+        name = str_extract(entry)
+        if not isinstance(name, str):
+            _raise_invalid_criterion_param(j, "Type token must be a string like 'max', 'min', 'nominal', 'interval'.")
+        name = name.strip().lower()
+
+        if name not in ("max", "min", "nominal", "interval"):
+            raise ValueError("criterion_type entries must be: 'max', 'min', ['nominal', target], ['interval', a, b].")
+
+        if name in ("max", "min"):
+            ctype_name.append(name)
+            params.append(tuple())
+            continue
+
+        # From here: nominal/interval must be list/tuple/ndarray
+        if not isinstance(entry, (list, tuple, np.ndarray)):
+            _raise_invalid_criterion_param(j, f"'{name}' must be provided as a list, e.g. ['{name}', ...].")
+
+        if name == "nominal":
+            if len(entry) < 2:
+                _raise_invalid_criterion_param(j, "nominal requires ['nominal', target_value].")
+            target = entry[1]
+            if not isinstance(target, (int, float, np.integer, np.floating)):
+                _raise_invalid_criterion_param(j, f"nominal target_value must be numeric, got {type(target)}.")
+            ctype_name.append(name)
+            params.append((float(target),))
+            continue
+
+        if name == "interval":
+            if len(entry) < 3:
+                _raise_invalid_criterion_param(j, "interval requires ['interval', a, b] where a/b define bounds.")
+            a, b = entry[1], entry[2]
+            if not isinstance(a, (int, float, np.integer, np.floating)) or not isinstance(b, (int, float, np.integer, np.floating)):
+                _raise_invalid_criterion_param(j, f"interval bounds must be numeric, got {type(a)} and {type(b)}.")
+            L, U = float(a), float(b)
+            if L > U:
+                # Per requirement: swap if order is reversed
+                L, U = U, L
+            ctype_name.append(name)
+            params.append((L, U))
+            continue
+
+    return ctype_name, params
+
+
+def distance_to_target(x, target):
+    """Absolute distance to a target value (nominal-the-best)."""
+    x = np.asarray(x, dtype=float)
+    return np.abs(x - float(target))
+
+
+def distance_to_interval(x, L, U, mode="piecewise"):
+    """
+    Distance to an interval [L, U].
+
+    mode='piecewise' implements:
+      d=0 if x in [L,U]
+      d=L-x if x<L
+      d=x-U if x>U
+
+    Keeping 'mode' makes it easy to change the penalty function later.
+    """
+    if mode != "piecewise":
+        raise NotImplementedError(f"Unsupported distance mode: {mode}")
+
+    x = np.asarray(x, dtype=float)
+    L = float(L)
+    U = float(U)
+
+    d = np.zeros_like(x, dtype=float)
+    below = x < L
+    above = x > U
+    d[below] = L - x[below]
+    d[above] = x[above] - U
+    return d
+
+
+def distance_to_benefit(d, eps=1e-12):
+    """
+    Convert a non-negative distance array into a benefit score in [0, 1], where smaller distance is better.
+
+    Mapping (default, easy to modify):
+      benefit = 1 - d / (max(d) + eps)
+
+    Special handling (per requirement):
+      - If all distances are the same (including all zeros), benefit becomes all-ones,
+        and we emit a "constant column" warning upstream.
+    """
+    d = np.asarray(d, dtype=float)
+    if d.size == 0:
+        return d, True  # edge case
+
+    # If the column has identical distances, treat as equally good for all alternatives.
+    if np.allclose(d, d[0]):
+        benefit = np.ones_like(d, dtype=float)
+        return benefit, True
+
+    dmax = float(np.max(d))
+    benefit = 1.0 - (d / (dmax + float(eps)))
+    benefit = np.clip(benefit, 0.0, 1.0)
+
+    # This should be rare after the allclose check, but keep it robust.
+    is_constant = bool(np.allclose(benefit, benefit[0]))
+    return benefit, is_constant
+
+
+def apply_routeA_transform(X, ctype_name, params, verbose=True):
+    """
+    Route A: transform nominal/interval criteria into benefit-type columns before TOPSIS.
+
+    - nominal(target): distance = |x - target|
+    - interval(L,U): distance = distance_to_interval(x, L, U)
+
+    After transformation, these columns are treated as 'max' in TOPSIS.
+
+    Returns
+    -------
+    X_eff : ndarray (m, n)
+        Transformed dataset.
+    ctype_eff : list[str] length n
+        Effective types for TOPSIS: only 'max'/'min'.
+    """
+    X = np.asarray(X, dtype=float)
+    m, n = X.shape
+
+    X_eff = np.array(X, copy=True, dtype=float)
+    ctype_eff = []
+
+    for j in range(n):
+        tname = ctype_name[j]
+
+        if tname == "max":
+            ctype_eff.append("max")
+            continue
+
+        if tname == "min":
+            ctype_eff.append("min")
+            continue
+
+        if tname == "nominal":
+            target = params[j][0]
+            d = distance_to_target(X[:, j], target=target)
+            benefit, is_constant = distance_to_benefit(d)
+            X_eff[:, j] = benefit
+            ctype_eff.append("max")
+
+            if is_constant:
+                msg = (
+                    f"Route A transform produced a constant column for criterion j={j} (1-based {j+1}) "
+                    f"[nominal target={target}]. All alternatives are equally scored on this criterion."
+                )
+                warnings.warn(msg, RuntimeWarning)
+                if verbose:
+                    print("Warning:", msg)
+            continue
+
+        if tname == "interval":
+            L, U = params[j]
+            d = distance_to_interval(X[:, j], L=L, U=U, mode="piecewise")
+            benefit, is_constant = distance_to_benefit(d)
+            X_eff[:, j] = benefit
+            ctype_eff.append("max")
+
+            if is_constant:
+                msg = (
+                    f"Route A transform produced a constant column for criterion j={j} (1-based {j+1}) "
+                    f"[interval L={L}, U={U}]. All alternatives are equally scored on this criterion."
+                )
+                warnings.warn(msg, RuntimeWarning)
+                if verbose:
+                    print("Warning:", msg)
+            continue
+
+        # Should never happen due to parsing validation
+        _raise_invalid_criterion_param(j, f"Unhandled criterion type: {tname}")
+
+    return X_eff, ctype_eff
+
+
+###############################################################################
+# TOPSIS core
+
+def topsis_method(dataset, weights, criterion_type,
+                  plot_bar=False, plot_geom=False,
+                  alt_labels=None,
+                  verbose=True,
+                  save_prefix=None,
+                  show_plots=True):
+    """
+    TOPSIS method (supports max/min + Route A for nominal/interval).
 
     Parameters
     ----------
     dataset : array-like, shape (m, n)
         Alternatives x criteria.
     weights : array-like, shape (n,)
-        Criteria weights (non-negative).
-    criterion_type : list
-        Each element is one of:
-          - 'max'
-          - 'min'
-          - ('nominal', target)
-          - ('interval', lower, upper)
+        Criteria weights (non-negative). Will be normalized to sum to 1.
+    criterion_type : list, length n
+        Supported per criterion j:
+          - 'max' (benefit)
+          - 'min' (cost)
+          - ['nominal', target_value]          (target-the-best; Route A -> benefit transform)
+          - ['interval', a, b]                (interval-the-best; Route A -> benefit transform)
+            where a/b order can be swapped.
+
+        Example:
+          ['max', ['nominal', 5], ['interval', 213, 23]]
+
+    plot_bar : bool
+        Whether to draw the ranked bar chart (topis_bars).
+    plot_geom : bool
+        Whether to draw the geometry plot (S+ vs S-).
+    alt_labels : list[str] or None
+        Alternative labels for the bar chart. If None -> a1..am.
+    verbose : bool
+        Print Ci values and warnings.
+    save_prefix : str or None
+        If provided, saves plots as PDF:
+          f"{save_prefix}_ranking_bar.pdf"
+          f"{save_prefix}_topsis_geometry.pdf"
+    show_plots : bool
+        If True, show plots; if False, only save (when save_prefix is set).
 
     Returns
     -------
-    c_i : ndarray, shape (m,)
-        Closeness coefficients.
+    c_i : ndarray shape (m,)
+        Closeness coefficients (higher is better).
     """
+    set_paper_style()
 
-    # ---------- Basic checks ----------
+    # Dataset validation
     X = np.asarray(dataset, dtype=float)
     if X.ndim != 2:
-        raise ValueError("dataset must be 2D.")
+        raise ValueError("dataset must be a 2D array of shape (m, n).")
     m, n = X.shape
 
+    # Finite check with positions
+    _finite_check_or_raise(X, name="dataset")
+
+    # Weights validation
     w = np.asarray(weights, dtype=float).ravel()
     if w.shape[0] != n:
-        raise ValueError("weights length mismatch.")
+        raise ValueError("weights length must equal number of criteria (dataset.shape[1]).")
+    _finite_check_or_raise(w, name="weights")
     if np.any(w < 0):
         raise ValueError("weights must be non-negative.")
-    w = w / np.sum(w)
+    if np.allclose(np.sum(w), 0.0):
+        raise ValueError("weights sum to zero; provide at least one positive weight.")
+    w = w / np.sum(w)  # normalize weights
 
-    if len(criterion_type) != n:
-        raise ValueError("criterion_type length mismatch.")
+    # Parse criterion types (supports nominal/interval)
+    ctype_name, cparams = parse_criterion_type(criterion_type, n)
 
-    # ---------- Vector normalization ----------
-    norms = np.linalg.norm(X, axis=0)
+    # Route A: transform nominal/interval into benefit-type columns
+    X_eff, ctype_eff = apply_routeA_transform(X, ctype_name, cparams, verbose=verbose)
+
+    # Vector normalization (standard TOPSIS)
+    norms = np.linalg.norm(X_eff, axis=0)
     if np.any(np.isclose(norms, 0.0)):
-        raise ValueError("Zero-norm criterion column detected.")
-    R = X / norms
+        zero_cols = np.where(np.isclose(norms, 0.0))[0].tolist()
+        raise ValueError(f"One or more criteria columns have zero norm (all zeros). Columns: {zero_cols}")
+
+    R = X_eff / norms
+
+    # Weighted normalized matrix
     V = R * w
 
-    # ---------- Ideal solutions ----------
-    A_pos = np.zeros(n)
-    A_neg = np.zeros(n)
-
+    # Ideal solutions (only max/min remain after Route A)
+    A_pos = np.zeros(n, dtype=float)
+    A_neg = np.zeros(n, dtype=float)
     for j in range(n):
-        ct = criterion_type[j]
-
-        # Case 1: max / min
-        if isinstance(ct, str):
-            t = ct.strip().lower()
-            if t == "max":
-                A_pos[j] = np.max(V[:, j])
-                A_neg[j] = np.min(V[:, j])
-            elif t == "min":
-                A_pos[j] = np.min(V[:, j])
-                A_neg[j] = np.max(V[:, j])
-            else:
-                raise ValueError(f"Unknown criterion type: {ct}")
-
-        # Case 2: nominal (target-based)
-        elif isinstance(ct, (list, tuple)) and len(ct) == 2:
-            kind, target = ct
-            if str(kind).lower() != "nominal":
-                raise ValueError(f"Invalid nominal definition: {ct}")
-
-            # target must be mapped to normalized-weighted space
-            target = float(target)
-            target_v = (target / norms[j]) * w[j]
-
-            # Positive ideal = target
-            A_pos[j] = target_v
-
-            # Negative ideal = farthest observed value from target
-            distances = np.abs(V[:, j] - target_v)
-            A_neg[j] = V[np.argmax(distances), j]
-
-        # Case 3: interval (range-based)
-        elif isinstance(ct, (list, tuple)) and len(ct) == 3:
-            kind, lower, upper = ct
-            if str(kind).lower() != "interval":
-                raise ValueError(f"Invalid interval definition: {ct}")
-
-            lower, upper = float(lower), float(upper)
-            if lower > upper:
-                raise ValueError("Interval lower bound > upper bound.")
-
-            lower_v = (lower / norms[j]) * w[j]
-            upper_v = (upper / norms[j]) * w[j]
-
-            # Positive ideal = midpoint of interval
-            A_pos[j] = 0.5 * (lower_v + upper_v)
-
-            # Negative ideal = farthest observed value from the interval
-            distances = np.where(
-                V[:, j] < lower_v, lower_v - V[:, j],
-                np.where(V[:, j] > upper_v, V[:, j] - upper_v, 0.0)
-            )
-            A_neg[j] = V[np.argmax(distances), j]
-
+        if ctype_eff[j] == "max":
+            A_pos[j] = np.max(V[:, j])
+            A_neg[j] = np.min(V[:, j])
+        elif ctype_eff[j] == "min":
+            A_pos[j] = np.min(V[:, j])
+            A_neg[j] = np.max(V[:, j])
         else:
-            raise ValueError(f"Invalid criterion_type entry: {ct}")
+            # Should never happen: Route A guarantees only max/min here
+            _raise_invalid_criterion_param(j, f"Unhandled effective type: {ctype_eff[j]}")
 
-    # ---------- Distances ----------
+    # Distances to ideals
     S_plus = np.linalg.norm(V - A_pos, axis=1)
     S_minus = np.linalg.norm(V - A_neg, axis=1)
 
+    # Closeness coefficient
     denom = S_plus + S_minus
     if np.any(np.isclose(denom, 0.0)):
-        raise ValueError("Zero denominator in closeness coefficient.")
-
+        raise ValueError("Encountered zero denominator in closeness coefficient computation.")
     c_i = S_minus / denom
+
+    # Best alternative (max Ci)
+    best_idx = int(np.argmax(c_i))
 
     if verbose:
         for i, val in enumerate(c_i, start=1):
-            print(f"a{i}: {val:.4f}")
-        best = int(np.argmax(c_i))
-        print(f"Best alternative: a{best+1}")
+            print(f"a{i}: {val:.3f}")
+        print(f"Best alternative: a{best_idx+1} (max Ci = {c_i[best_idx]:.3f})")
+
+    # Plotting controlled by two booleans
+    if alt_labels is None:
+        alt_labels = [f"a{i+1}" for i in range(m)]
+
+    if plot_bar:
+        bar_save = None
+        if save_prefix is not None:
+            bar_save = f"{save_prefix}_ranking_bar.pdf"
+        topis_bars(
+            scores=c_i,
+            labels=alt_labels,
+            title="TOPSIS Ranking (Closeness Coefficient, Ci)",
+            xlabel="Closeness coefficient (Ci)",
+            show_values=True,
+            save_path=bar_save,
+            show=show_plots
+        )
+
+    if plot_geom:
+        geom_save = None
+        if save_prefix is not None:
+            geom_save = f"{save_prefix}_topsis_geometry.pdf"
+        topsis_geometry_plot(
+            S_plus=S_plus,
+            S_minus=S_minus,
+            best_idx=best_idx,
+            title="TOPSIS Geometry (S+ vs S-)",
+            save_path=geom_save,
+            show=show_plots,
+            invert_x=True
+        )
 
     return c_i
 

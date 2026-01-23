@@ -16,7 +16,7 @@ import topsis_modified as alg
 weights =  [0.25, 0.25, 0.25, 0.25]
 
 # Load Criterion Type: 'max' or 'min' or 'interval' or 'nominal'
-criterion_type = ['max', ['interval', 5, 3], ['nominal', 4], 'max']
+criterion_type = ['max', ['interval', 5, 3], ['nominal', 6], 'max']
 
 # Dataset
 dataset = np.array([
@@ -34,9 +34,9 @@ dataset = np.array([
 
 # Call TOPSIS. The official topsis_method isn't robust enough, 
 # so we use the modified_topsis, able to handle non-polarized data
-relative_closeness = alg.topsis_method(dataset, weights, criterion_type,
-                                        plot_bar=True, plot_geom=True,
-                                        alt_labels=None,
-                                        verbose=True,
-                                        save_prefix=1,
-                                        show_plots=True)
+relative_closeness = alg.topsis_method(dataset, weights, criterion_type,   #literal meaning
+                                        plot_bar=True, plot_geom=True,     #to draw pr not
+                                        alt_labels=None,                   #labels for alternatives
+                                        verbose=True,                      #verbose or not (extra contents like warnings and alternatives ci value)
+                                        save_prefix='test',                #prefix.name for saving plots. suffix.name seen at topsis_modified.py
+                                        show_plots=True)                   #to plt.show() or not

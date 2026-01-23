@@ -1,5 +1,30 @@
-/draft
-/pyDecision(English)
-/pyDecision(Chinese)
-__pycache__/
+# Personal drafts
 drafts/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Logs / temp
+*.log
+*.tmp
+
+# Outputs 
+*.pdf
+*.png
+*.svg
+*.jpg
