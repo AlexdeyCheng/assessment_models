@@ -1,5 +1,6 @@
 # Personal drafts
 drafts/
+LR_test/
 
 # Python cache
 __pycache__/
@@ -28,3 +29,4 @@ Thumbs.db
 *.png
 *.svg
 *.jpg
+
