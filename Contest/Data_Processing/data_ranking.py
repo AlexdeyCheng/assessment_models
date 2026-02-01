@@ -3,156 +3,151 @@ import numpy as np
 import re
 import warnings
 
-# --- CANONICAL REPRESENTATION LAYER ---
-
+# --- 1. PARSER LAYER ---
 class StatusParser:
-    """
-    Decouples text parsing from logic.
-    """
-    
     @staticmethod
     def parse(row, season_max_week, person_max_week):
-        res = str(row['results']).strip() # Ensure strip happens here too
+        res = str(row['results']).strip()
         current_week = row['week']
         
-        # 0. Active Check
-        # If current week is strictly less than person's max week, they are SAFE.
+        # Active Check
         if current_week < person_max_week:
-             return 'safe', 0.0, np.nan
+             return 'safe', np.nan, np.nan
 
-        # --- LAST WEEK LOGIC ---
-
-        # 1. Parse Withdrew
+        # Parse Withdrew
         if 'withdrew' in res.lower():
             week_match = re.search(r'Week\s+(\d+)', res, re.IGNORECASE)
             exit_w = int(week_match.group(1)) if week_match else current_week
             return 'withdrew', np.nan, exit_w
 
-        # 2. Parse Specific Ranks (1st Place, 2nd Place...)
-        # FIXED REGEX: Uses \s+ which covers \xa0 in Python 3, but we add robustness.
-        # We also allow case insensitivity and loose spacing.
+        # Parse Ranks (1st Place...)
         rank_match = re.search(r'(\d+)(?:st|nd|rd|th)[\s\xa0]+Place', res, re.IGNORECASE)
-        
         if rank_match:
             rank_val = float(rank_match.group(1))
-            
-            # Top 3 are always Final
-            if rank_val <= 3.0:
-                return 'final', rank_val, current_week
-            
-            # 4th/5th need to be at Season Finale
-            if current_week >= season_max_week: 
-                return 'final', rank_val, current_week
-            else:
-                return 'eliminated', np.nan, current_week
+            if rank_val <= 5.0:
+                if rank_val <= 3.0 or current_week >= season_max_week:
+                    return 'final', rank_val, current_week
+                else:
+                    return 'eliminated', np.nan, current_week
 
-        # 3. Parse Standard Elimination
+        # Parse Standard Elimination
         if 'eliminated' in res.lower():
             week_match = re.search(r'Week\s+(\d+)', res, re.IGNORECASE)
             exit_w = int(week_match.group(1)) if week_match else current_week
             return 'eliminated', np.nan, exit_w
 
-        # 4. Emergency Fallback for "Place" without Rank (Data Error?)
-        if 'place' in res.lower():
-            # If we see "Place" but regex failed, it's likely a weird formatting issue.
-            # Assume Finalist if Logic 0 passed (it's their last week).
-            warnings.warn(f"Warning: ambiguous 'Place' string found: '{res}'. Marking as potential final.")
-            # Try to extract ANY digit
-            digit_match = re.search(r'(\d+)', res)
-            if digit_match:
-                r_val = float(digit_match.group(1))
-                return 'final', r_val, current_week
-
-        # 5. True Fallback
+        # Fallback
+        if 'winner' in res.lower(): return 'final', 1.0, current_week
+        if 'runner-up' in res.lower(): return 'final', 2.0, current_week
         return 'eliminated', np.nan, current_week
 
+# --- 2. RANK CALCULATOR ---
+class RankCalculator:
+    @staticmethod
+    def calculate_season_ranks(df_season):
+        rank_map = {}
+        # 1. Withdrew -> 0
+        withdrew = df_season[df_season['exit_mode'] == 'withdrew']
+        for name in withdrew['celebrity_name'].unique():
+            rank_map[name] = 0.0
+            
+        # 2. Finalists
+        finalists = df_season[df_season['exit_mode'] == 'final'].copy()
+        for _, row in finalists.iterrows():
+            rank_map[row['celebrity_name']] = row['final_rank_parsed']
+            
+        # 3. Eliminated (Sort by Exit Week Descending)
+        if not finalists.empty:
+            next_rank = finalists['final_rank_parsed'].max() + 1
+        else:
+            next_rank = 1.0
+            
+        eliminated = df_season[df_season['exit_mode'] == 'eliminated'].copy()
+        exit_weeks = eliminated['exit_week_parsed'].sort_values(ascending=False).unique()
+        
+        current_rank = next_rank
+        for w in exit_weeks:
+            people = eliminated[eliminated['exit_week_parsed'] == w]['celebrity_name'].unique()
+            for p in people:
+                rank_map[p] = current_rank
+            current_rank += len(people) # Skip numbers
+            
+        return rank_map
 
-# --- LOGIC LAYER ---
+# --- 3. LOGIC LAYER ---
+def _accumulate_scores(df_weekly):
+    df_out = df_weekly.copy()
+    df_out['effective_score'] = df_out['weekly_raw_score']
+    df_out['is_accumulated'] = False
+    
+    for s in df_out['season'].unique():
+        s_data = df_out[df_out['season'] == s]
+        mask_w1_elim = (s_data['exit_mode'] == 'eliminated') & (s_data['exit_week_parsed'] == 1)
+        
+        if not mask_w1_elim.any(): # Only accumulate if NO elimination in W1
+            w1_scores = s_data[s_data['week'] == 1].set_index('celebrity_name')['weekly_raw_score']
+            mask_w2 = (df_out['season'] == s) & (df_out['week'] == 2)
+            df_out.loc[mask_w2, 'effective_score'] += df_out.loc[mask_w2, 'celebrity_name'].map(w1_scores).fillna(0)
+            df_out.loc[mask_w2, 'is_accumulated'] = True
+    return df_out
 
 def _calculate_metrics(df_slice, season_num):
     if (season_num <= 2) or (season_num >= 28):
         return df_slice.groupby('week')['effective_score'].rank(method='min', ascending=False)
     else:
-        week_sums = df_slice.groupby('week')['effective_score'].transform('sum')
-        return df_slice['effective_score'] / week_sums
-
-def _accumulate_scores(df_weekly):
-    df_out = df_weekly.copy()
-    df_out['effective_score'] = df_out['weekly_raw_score']
-    df_out['is_cumulative'] = False
-    
-    seasons = df_out['season'].unique()
-    
-    for s in seasons:
-        s_data = df_out[df_out['season'] == s]
-        
-        # LOGIC FIX:
-        # A person breaks accumulation ONLY IF:
-        # 1. Their mode is 'eliminated' or 'withdrew'
-        # 2. AND their exit_week is ACTUALLY 1.
-        
-        mask_w1_exit = (
-            (s_data['exit_mode'].isin(['eliminated', 'withdrew'])) & 
-            (s_data['exit_week_parsed'] == 1)
-        )
-        
-        has_w1_exit = mask_w1_exit.any()
-        
-        if not has_w1_exit:
-            w1_scores = s_data[s_data['week'] == 1].set_index('celebrity_name')['weekly_raw_score']
-            mask_w2 = (df_out['season'] == s) & (df_out['week'] == 2)
-            df_out.loc[mask_w2, 'effective_score'] += df_out.loc[mask_w2, 'celebrity_name'].map(w1_scores).fillna(0)
-            df_out.loc[mask_w2, 'is_cumulative'] = True
-            
-    return df_out
+        sums = df_slice.groupby('week')['effective_score'].transform('sum')
+        return df_slice['effective_score'] / sums
 
 def process_ranking_features(df_clean):
-    # 1. Aggregation
+    # Aggregation
     group_cols = ['season', 'week', 'celebrity_name', 'results', 'age', 'industry', 'partner']
     df_weekly = df_clean.groupby(group_cols)['raw_score'].sum().reset_index()
     df_weekly.rename(columns={'raw_score': 'weekly_raw_score'}, inplace=True)
     
-    # 2. Canonical Parsing
+    # Parser
     season_max_map = df_weekly.groupby('season')['week'].max().to_dict()
     person_max_map = df_weekly.groupby(['season', 'celebrity_name'])['week'].max().to_dict()
     
-    # [DEBUG PRINT INJECTION]
-    # Check Kelly Monaco's Max Week
-    k_max = person_max_map.get((1, 'Kelly Monaco'), -1)
-    if k_max != -1 and k_max < 6:
-        print(f"DEBUG WARNING: Kelly Monaco Max Week detected as {k_max}. Expecting 6.")
-
     def apply_parser(row):
-        s_max = season_max_map[row['season']]
-        p_max = person_max_map[(row['season'], row['celebrity_name'])]
-        return pd.Series(StatusParser.parse(row, s_max, p_max))
+        return pd.Series(StatusParser.parse(row, season_max_map[row['season']], person_max_map[(row['season'], row['celebrity_name'])]))
 
-    parsed_data = df_weekly.apply(apply_parser, axis=1)
-    parsed_data.columns = ['exit_mode', 'final_rank_parsed', 'exit_week_parsed']
-    
-    df_weekly = pd.concat([df_weekly, parsed_data], axis=1)
+    parsed = df_weekly.apply(apply_parser, axis=1)
+    parsed.columns = ['exit_mode', 'final_rank_parsed', 'exit_week_parsed']
+    df_weekly = pd.concat([df_weekly, parsed], axis=1)
 
-    # 3. Accumulation
+    # Logic
     df_weekly = _accumulate_scores(df_weekly)
-
-    # 4. Metrics
+    
+    # Metrics
     df_weekly['judge_metric'] = np.nan
-    seasons = df_weekly['season'].unique()
-    for s in seasons:
+    for s in df_weekly['season'].unique():
         mask = df_weekly['season'] == s
         df_weekly.loc[mask, 'judge_metric'] = _calculate_metrics(df_weekly.loc[mask], s)
 
-    # 5. Target Generation
-    df_weekly['audience_rank_proxy'] = 0.0 
+    # Global Rank (The Missing Link!)
+    rank_frames = []
+    for s in df_weekly['season'].unique():
+        s_data = df_weekly[df_weekly['season'] == s].copy()
+        # Find last week for each person to determine their rank
+        last_rows = s_data.sort_values('week').groupby('celebrity_name').tail(1)
+        ranks = RankCalculator.calculate_season_ranks(last_rows)
+        s_data['final_rank'] = s_data['celebrity_name'].map(ranks)
+        rank_frames.append(s_data)
     
-    mask_final = df_weekly['exit_mode'] == 'final'
-    df_weekly.loc[mask_final, 'audience_rank_proxy'] = df_weekly.loc[mask_final, 'final_rank_parsed']
+    df_final = pd.concat(rank_frames)
+
+    # Column Filter (Strict Check)
+    keep_cols = [
+        'season', 'week', 'celebrity_name', 'results', 'age', 'industry', 'partner', 
+        'weekly_raw_score', 'effective_score', 'is_accumulated',
+        'exit_mode', 'final_rank', 'exit_week_parsed', 'judge_metric'
+    ]
     
-    mask_gone = df_weekly['exit_mode'].isin(['eliminated', 'withdrew'])
-    df_weekly.loc[mask_gone, 'audience_rank_proxy'] = np.nan
+    # Check if 'final_rank' exists immediately
+    if 'final_rank' not in df_final.columns:
+         raise ValueError("CRITICAL ERROR: 'final_rank' was not created in data_ranking.py!")
+
+    df_final = df_final[keep_cols]
+    df_final.sort_values(by=['season', 'celebrity_name', 'week'], inplace=True)
     
-    df_weekly['is_eliminated'] = mask_gone
-    
-    df_weekly.sort_values(by=['season', 'celebrity_name', 'week'], inplace=True)
-    
-    return df_weekly
+    return df_final

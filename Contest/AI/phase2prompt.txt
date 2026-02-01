@@ -1,0 +1,64 @@
+预沟通型
+【指令文档：Phase 2 赛制量化对比与争议挖掘系统】
+任务目标
+在 Phase 1 完成观众投票估算的基础上，对 Rank（排名制）与 Percent（百分比制）两种赛制进行全量反事实模拟（Counterfactual Simulation）。
+通过引入统计学模型（Bradley-Terry）、稳定性指标（翻转率）及公平性度量（SNR），量化评估不同赛制的优劣，并精准识别争议选手。
+
+1. 数据准备与模拟引擎 (Simulation Engine)
+输入数据: 加载 最原始官方数据 
+忽略历史淘汰的截断效应，假设观众和裁判的评分偏好在反事实情境下保持稳定。
+对 S1-S34 所有赛季，分别生成 4 组完整的周排名结果：
+Result_Rank: 纯排名制结果。
+Result_Percent: 纯百分比制结果。
+Result_Rank_Save: 排名制 + Judge Save（倒数两名由裁判决定）。
+Result_Percent_Save: 百分比制 + Judge Save。
+我们为本项目生成新的，统一的数据文件phase2_input_data.csv
+从处理过的长表cleaned_dwts_data_raw读取数据。
+
+2. 核心评价指标体系 (Metrics Calculation)
+请编写函数计算以下四个维度的指标：
+A. 一致性/自洽性 (Consistency via Bradley-Terry)
+方法: 使用 Bradley-Terry Model。
+逻辑: 将裁判打分（Judge Scores）和估算粉丝票（Fan Votes）分别转化为成对比较矩阵（Pairwise Comparisons）。
+若 $Score_A > Score_B$，记为 A 胜 B。
+计算: 使用极大似然估计（MLE）拟合模型参数，并计算 Log-Likelihood (对数似然值) 或 Pseudo-$R^2$（一致性指标）。
+目的: 数值越高，说明该群体的评分逻辑越自洽（Internal Consistency），更有统计学参考价值。
+B. 稳定性 (Stability via Turnover Rate)
+对judge/vote：
+计算各赛季内，各个选手所有week的裁判评分和观众评分的标准差；
+计算同赛季同一周内，不同选手的裁判评分和观众评分的标准差；
+
+对rank/percentage：
+定义: 相邻两周之间，选手两两排名关系的翻转比例。
+拟合: 拟合幂律衰减曲线 $\tau(w) = b \cdot w^a$。
+$w$: 比赛周数 (Week Number)。
+$a$: 衰减系数 (Decay Rate)。
+目的: $a$ 越负（衰减越快），说明赛制越能迅速建立稳定的实力秩序，减少无意义的震荡。根据开源论文的数据区间进行判定，这部分要等等。
+
+C. 公平性与冤案度量 (Fairness & SNR)
+指标: Save Necessity Rate (SNR, 拯救必要性频率)。
+定义: 在模拟结果的 Bottom 2（倒数两名）中，包含“当周裁判分最高的前 50% 选手”的概率。
+目的: SNR 越高，说明该赛制越容易把高分选手推向淘汰边缘（即制造“冤案”），赛制缺陷越大。
+
+D. 争议度量 (Controversy Identification)
+指标: Kendall's Tau Distance ($\Delta R$, 排名位移)。
+计算: 计算每位选手在 Result_Rank 和 Result_Percent 两种赛制下最终排名的 Kendall Distance。
+聚类: 对 $\Delta R$ 进行 K-Means 聚类 (k=3)，自动识别出：
+Cluster 0: 稳定区（赛制无关）。
+Cluster 1: 争议区-Rank受益者。
+Cluster 2: 争议区-Percent受益者。
+
+要求：
+将上述内容载入记忆表，返回你对上述内容的理解。我们将分阶段完成代码编写。
+第一步：
+数据再清洗
+第二步
+裁判评分和观众评分一致性检验
+第三步
+rank/percentage方案评价
+第四步
+judge save必要性分析
+第五步
+可视化分析。
+
+准备好后，我将发布第一阶段具体指令。

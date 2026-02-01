@@ -18,25 +18,29 @@ def clean_dwts_data(df_raw):
 
     # --- DEFENSE 1: Check Input Integrity ---
     df.columns = df.columns.str.strip() # Remove header whitespace
-    required_cols_map = {
+    
+    # Required columns map
+    rename_map = {
         'celebrity_age_during_season': 'age',
         'celebrity_industry': 'industry',
         'ballroom_partner': 'partner'
     }
     
-    missing = [c for c in required_cols_map.keys() if c not in df.columns]
+    missing = [c for c in rename_map.keys() if c not in df.columns]
     if missing:
         raise ValueError(f"CRITICAL ERROR: Input CSV missing required columns: {missing}")
 
     # 1. Rename
-    df.rename(columns=required_cols_map, inplace=True)
+    df.rename(columns=rename_map, inplace=True)
 
     # 2. Type Validation (Age)
-    # Coerce errors to NaN, then check if we lost data implies dirty input
+    # Coerce errors to NaN. If we lose too much data, warn the user.
+    original_nans = df['age'].isna().sum()
     df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    if df['age'].isna().sum() > df_raw[list(required_cols_map.keys())[0]].isna().sum():
-         # If we have more NaNs now than before, it means some values were non-numeric garbage
-         warnings.warn("Warning: Some 'age' values were non-numeric and converted to NaN.")
+    new_nans = df['age'].isna().sum()
+    
+    if new_nans > original_nans:
+         warnings.warn(f"Warning: {new_nans - original_nans} 'age' values were non-numeric and converted to NaN.")
 
     # 3. Global Text Strip
     df_obj = df.select_dtypes(['object'])
@@ -61,16 +65,16 @@ def clean_dwts_data(df_raw):
     if (df_long['raw_score'] < 0).any():
         raise ValueError("CRITICAL ERROR: Negative scores detected in raw data.")
 
-    # Filter: Valid scores only (>0)
+    # Filter: Valid scores only (>0). 0 usually means didn't dance.
     df_clean = df_long[df_long['raw_score'] > 0].copy()
 
-    # 6. Extract Metadata
+    # 6. Extract Metadata (Week & Judge ID)
     df_clean['week'] = df_clean['week_judge_id'].str.extract(r'week(\d+)_').astype(int)
     df_clean['judge_idx'] = df_clean['week_judge_id'].str.extract(r'judge(\d+)_').astype(int)
 
     # 7. Standardize 'Withdrew' timing in 'results' string
-    # Logic: We modify the string so downstream Parser can find the week easily.
-    # But we KEEP the word 'Withdrew' for the Parser to set exit_mode.
+    # Logic: Inject "Eliminated Week X" into the string so Parsers can find the timing.
+    # But KEEP the word 'Withdrew' so StatusParser can set exit_mode='withdrew'.
     withdrew_mask = df_clean['results'].str.lower() == 'withdrew'
     withdrew_people = df_clean.loc[withdrew_mask, 'celebrity_name'].unique()
 
@@ -83,14 +87,12 @@ def clean_dwts_data(df_raw):
             
             if mask.any():
                 last_week = df_clean.loc[mask, 'week'].max()
-                # Rule: W1 Withdrew -> Eliminated Week 1 (No Accumulation)
-                elim_week = 1 if last_week == 1 else last_week + 1
-                # Mark clearly for parser
+                # Rule: Withdrew at Week X -> Left at Week X (or X+1 depending on timing, assuming X here)
+                # To be safe and consistent with elimination logic:
+                # If they danced in Week X and withdrew, they are gone by Week X+1 results.
+                # We mark the effective exit week.
+                elim_week = last_week 
                 new_status = f"Eliminated Week {elim_week} (Withdrew)"
                 df_clean.loc[mask, 'results'] = new_status
-
-    # 8. Clean Placement
-    if 'placement' in df_clean.columns:
-        df_clean['clean_placement'] = df_clean['placement'].apply(extract_placement_numeric)
 
     return df_clean.sort_values(by=['season', 'week', 'celebrity_name', 'judge_idx'])
