@@ -17,8 +17,8 @@ from tqdm import tqdm
 from joblib import Parallel, delayed
 
 # ================= Configuration =================
-INPUT_DIR = r"D:/Files/Study/code/DataProcessing/assessment_models/Contest/Fan_Vote_Simulator/adjusted_solution/input_data"
-OUTPUT_DIR = r"D:/Files/Study/code/DataProcessing/assessment_models/Contest/Fan_Vote_Simulator/adjusted_solution/output_data"
+INPUT_DIR = r"D:/Files/Study/code/DataProcessing/assessment_models/Contest/Fan_Vote_Simulator1/adjusted_solution/input_data"
+OUTPUT_DIR = r"D:/Files/Study/code/DataProcessing/assessment_models/Contest/Fan_Vote_Simulator1/adjusted_solution/output_data"
 INPUT_FILE = os.path.join(INPUT_DIR, "dwts_model_ready.csv")
 
 # Ensure Output Directory Exists

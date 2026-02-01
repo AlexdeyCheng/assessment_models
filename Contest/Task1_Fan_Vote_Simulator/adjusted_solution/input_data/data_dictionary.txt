@@ -1,0 +1,59 @@
+DWTS Processed Data Dictionary
+==============================
+
+Column: season
+Desc:   Season number (1-33).
+Type:   int64
+----------------------------------------
+Column: week
+Desc:   Week number (Time Index).
+Type:   int64
+----------------------------------------
+Column: celebrity_name
+Desc:   Unique identifier for contestant.
+Type:   object
+----------------------------------------
+Column: results
+Desc:   Original text status (Withdrew annotated with exit week).
+Type:   object
+----------------------------------------
+Column: age
+Desc:   Contestant Age.
+Type:   int64
+----------------------------------------
+Column: industry
+Desc:   Contestant Industry.
+Type:   object
+----------------------------------------
+Column: partner
+Desc:   Professional Partner Name.
+Type:   object
+----------------------------------------
+Column: weekly_raw_score
+Desc:   Sum of judges' scores for this week.
+Type:   float64
+----------------------------------------
+Column: effective_score
+Desc:   Score used for elimination. Includes W1 score if W2 is cumulative.
+Type:   float64
+----------------------------------------
+Column: is_accumulated
+Desc:   Boolean. True if effective_score = W1 + W2.
+Type:   bool
+----------------------------------------
+Column: exit_mode
+Desc:   'safe' (active), 'final', 'eliminated', 'withdrew'.
+Type:   object
+----------------------------------------
+Column: final_rank
+Desc:   Global Rank. 0=Withdrew. 1+=Rank. Calculated based on text or exit timing.
+Type:   float64
+----------------------------------------
+Column: exit_week_parsed
+Desc:   The week the contestant left the competition.
+Type:   float64
+----------------------------------------
+Column: judge_metric
+Desc:   Standardized Judge Score. S1-2/S28+=Rank(Min), S3-27=Percentage.
+Type:   float64
+----------------------------------------
